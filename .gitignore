@@ -17,7 +17,7 @@ Thumbs.db
 
 *.AppImage
 *.desktop
-*.deb
+*.rpm
 *.exe
 
 .claude/

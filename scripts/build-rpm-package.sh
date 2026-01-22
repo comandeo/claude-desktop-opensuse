@@ -259,8 +259,8 @@ Supported on openSUSE Linux distributions.
 
 %install
 rm -rf %{buildroot}
-mkdir -p %{buildroot}
-cp -r $INSTALL_DIR/* %{buildroot}/
+mkdir -p %{buildroot}/usr
+cp -a $INSTALL_DIR/. %{buildroot}/usr/
 
 %post
 $POSTINST_SCRIPT
@@ -291,7 +291,6 @@ cp "$SPEC_FILE" "$RPM_BUILD_DIR/SPECS/"
 echo "Running rpmbuild..."
 if ! rpmbuild --define "_topdir $RPM_BUILD_DIR" \
      --define "_rpmdir $WORK_DIR" \
-     --buildroot="$PACKAGE_ROOT" \
      -bb "$RPM_BUILD_DIR/SPECS/$PACKAGE_NAME.spec"; then
     echo "❌ Failed to build RPM package"
     exit 1

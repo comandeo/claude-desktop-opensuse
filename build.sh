@@ -88,7 +88,7 @@ MAINTAINER="Claude Desktop Linux Maintainers"
 DESCRIPTION="Claude Desktop for Linux"
 PROJECT_ROOT="$(pwd)" WORK_DIR="$PROJECT_ROOT/build" APP_STAGING_DIR="$WORK_DIR/electron-app" VERSION="" 
 echo -e "\033[1;36m--- Argument Parsing ---\033[0m"
-BUILD_FORMAT="rpm"    CLEANUP_ACTION="yes"  TEST_FLAGS_MODE=false  LOCAL_EXE_PATH=""
+BUILD_FORMAT="rpm"    CLEANUP_ACTION="no"  TEST_FLAGS_MODE=false  LOCAL_EXE_PATH=""
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
@@ -114,7 +114,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
         echo "Usage: $0 [--build rpm|appimage] [--clean yes|no] [--exe /path/to/installer.exe] [--test-flags]"
         echo "  --build: Specify the build format (rpm or appimage). Default: rpm"
-        echo "  --clean: Specify whether to clean intermediate build files (yes or no). Default: yes"
+        echo "  --clean: Specify whether to clean intermediate build files (yes or no). Default: no"
         echo "  --exe:   Use a local Claude installer exe instead of downloading"
         echo "  --test-flags: Parse flags, print results, and exit without building."
         exit 0
@@ -169,7 +169,7 @@ check_command() {
 
 echo "Checking dependencies..."
 DEPS_TO_INSTALL=""
-COMMON_DEPS="p7zip wget wrestool icotool convert"
+COMMON_DEPS="p7zip wget wrestool icotool convert gcc-c++ make python3"
 RPM_DEPS="rpmbuild"
 APPIMAGE_DEPS=""
 ALL_DEPS_TO_CHECK="$COMMON_DEPS"
@@ -187,6 +187,9 @@ for cmd in $ALL_DEPS_TO_CHECK; do
             "wrestool"|"icotool") DEPS_TO_INSTALL="$DEPS_TO_INSTALL icoutils" ;;
             "convert") DEPS_TO_INSTALL="$DEPS_TO_INSTALL ImageMagick" ;;
             "rpmbuild") DEPS_TO_INSTALL="$DEPS_TO_INSTALL rpm-build" ;;
+            "gcc-c++"|"g++") DEPS_TO_INSTALL="$DEPS_TO_INSTALL gcc-c++" ;;
+            "make") DEPS_TO_INSTALL="$DEPS_TO_INSTALL make" ;;
+            "python3") DEPS_TO_INSTALL="$DEPS_TO_INSTALL python3" ;;
         esac
     fi
 done
@@ -288,6 +291,54 @@ if [ "$NODE_VERSION_OK" = false ]; then
     
     cd "$PROJECT_ROOT"
 fi
+
+# Check for Node.js development headers (needed for node-gyp to compile native modules)
+echo "Checking for Node.js development headers..."
+NODE_HEADERS_FOUND=false
+NODE_VERSION=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
+POSSIBLE_HEADER_PATHS=(
+    "/usr/include/node${NODE_VERSION}/common.gypi"
+    "/usr/include/node/common.gypi"
+)
+
+for header_path in "${POSSIBLE_HEADER_PATHS[@]}"; do
+    if [ -f "$header_path" ]; then
+        echo "✓ Found Node.js headers at $header_path"
+        NODE_HEADERS_FOUND=true
+        break
+    fi
+done
+
+if [ "$NODE_HEADERS_FOUND" = false ]; then
+    echo "⚠️  Node.js development headers not found"
+    echo "   node-pty compilation requires Node.js development headers"
+
+    # Try to determine the correct package name
+    NODEJS_DEVEL_PKG="nodejs${NODE_VERSION}-devel"
+
+    # Check if the package exists in repositories
+    if zypper search -x "$NODEJS_DEVEL_PKG" &>/dev/null; then
+        echo "   Installing $NODEJS_DEVEL_PKG..."
+        if ! sudo zypper install -y "$NODEJS_DEVEL_PKG"; then
+            echo "❌ Failed to install $NODEJS_DEVEL_PKG"
+            echo "   Please install Node.js development headers manually:"
+            echo "   sudo zypper install $NODEJS_DEVEL_PKG"
+            exit 1
+        fi
+    else
+        # Try generic nodejs-devel
+        echo "   Installing nodejs-devel..."
+        if ! sudo zypper install -y nodejs-devel; then
+            echo "❌ Failed to install nodejs-devel"
+            echo "   Please install Node.js development headers manually"
+            exit 1
+        fi
+    fi
+    echo "✓ Node.js development headers installed"
+else
+    echo "✓ Node.js development headers are available"
+fi
+
 echo -e "\033[1;36m--- End Node.js Setup ---\033[0m" 
 echo -e "\033[1;36m--- Electron & Asar Handling ---\033[0m"
 CHOSEN_ELECTRON_MODULE_PATH="" ASAR_EXEC=""
@@ -747,10 +798,29 @@ NODE_PTY_BUILD_DIR="$WORK_DIR/node-pty-build"
 mkdir -p "$NODE_PTY_BUILD_DIR"
 cd "$NODE_PTY_BUILD_DIR"
 echo '{"name":"node-pty-build","version":"1.0.0","private":true}' > package.json
-echo "Installing node-pty (this will compile native module for Linux)..."
-if npm install node-pty 2>&1; then
-    echo "✓ node-pty installed successfully"
 
+# Try to install node-pty with prebuilt binaries first, fall back to building if needed
+echo "Installing node-pty (will try prebuilt binaries first)..."
+NODE_PTY_INSTALLED=false
+
+# Try with prebuilt binaries only (skip build on failure)
+if npm install --ignore-scripts node-pty 2>&1; then
+    echo "✓ node-pty base package installed"
+
+    # Now try to get prebuilt binary or build
+    if npm rebuild node-pty 2>&1 || [ -f "$NODE_PTY_BUILD_DIR/node_modules/node-pty/build/Release/pty.node" ]; then
+        NODE_PTY_INSTALLED=true
+        echo "✓ node-pty native module ready"
+    else
+        echo "⚠️ Could not build or find prebuilt node-pty native module"
+        echo "   This is likely due to a node-gyp issue on openSUSE with Node 24"
+        echo "   Terminal features in Claude Code may not work"
+    fi
+else
+    echo "⚠️ Failed to install node-pty package"
+fi
+
+if [ "$NODE_PTY_INSTALLED" = true ]; then
     # Copy node-pty JavaScript files into the asar
     if [ -d "$NODE_PTY_BUILD_DIR/node_modules/node-pty" ]; then
         echo "Copying node-pty JavaScript files into app.asar.contents..."
@@ -761,9 +831,8 @@ if npm install node-pty 2>&1; then
     else
         echo "⚠️ node-pty installation directory not found"
     fi
-else
-    echo "⚠️ Failed to install node-pty - terminal features may not work"
 fi
+
 cd "$APP_STAGING_DIR"
 echo -e "\033[1;36m--- End node-pty installation ---\033[0m"
 
@@ -947,7 +1016,7 @@ if [ "$BUILD_FORMAT" = "rpm" ]; then
         echo "❌ RPM packaging script failed."
         exit 1
     fi
-    RPM_FILE=$(find "$WORK_DIR" -maxdepth 1 -name "${PACKAGE_NAME}-${VERSION}-*.${ARCHITECTURE}.rpm" | head -n 1)
+    RPM_FILE=$(find "$WORK_DIR" -maxdepth 2 -name "${PACKAGE_NAME}-${VERSION}-*.${ARCHITECTURE}.rpm" | head -n 1)
     echo "✓ RPM Build complete!"
     if [ -n "$RPM_FILE" ] && [ -f "$RPM_FILE" ]; then
         FINAL_OUTPUT_PATH="./$(basename "$RPM_FILE")" # Set final path using basename directly
